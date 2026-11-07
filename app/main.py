@@ -10,7 +10,8 @@ import httpx
 from fastapi import FastAPI
 
 from .pricing import get_prices, format_prices
-
+import json
+import websockets
 
 # CONFIG
 logging.basicConfig(

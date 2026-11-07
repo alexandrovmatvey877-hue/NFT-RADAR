@@ -15,6 +15,7 @@ log = logging.getLogger("nft-radar")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
+ADMIN_ID = os.getenv("ADMIN_ID", "")
 POLL_SECONDS = max(15, int(os.getenv("POLL_SECONDS", "25")))
 
 FEED_URL = "https://api.changes.tg/changes"

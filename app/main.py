@@ -119,6 +119,13 @@ async def scan():
             lines.append(f"Фон: {backdrop}")
         if symbol:
             lines.append(f"Узор: {symbol}")
+        if "fromPermille" in event and "toPermille" in event:
+    old = event["fromPermille"] / 10
+    new = event["toPermille"] / 10
+    lines.append(f"Редкость: {old}% → {new}%")
+
+        if event.get("giftId"):
+    lines.append(f"Gift ID: {event['giftId']}")
 
         if model:
             prices = await get_prices(gift, model)

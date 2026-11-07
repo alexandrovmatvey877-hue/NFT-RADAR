@@ -413,17 +413,18 @@ async def scanner():
 
 @asynccontextmanager
 async def lifespan(app):
-    task = asyncio.create_task(scanner())
-
-    yield
-
-    task.cancel()
+    tasks = [
+        asyncio.create_task(scanner()),
+        asyncio.create_task(live_monitor()),
+    ]
 
     try:
-        await task
-    except asyncio.CancelledError:
-        pass
+        yield
+    finally:
+        for task in tasks:
+            task.cancel()
 
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 app = FastAPI(
     title="NFT-RADAR",

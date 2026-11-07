@@ -247,6 +247,150 @@ async def scan():
 
     state["last_scan"] = datetime.now(timezone.utc).isoformat()
 
+LIVE_URL = "wss://live.see.tg/v1/ws"
+
+live_seen = set()
+
+
+async def build_live_message(data):
+    event_type = data.get("event", "unknown")
+    gift = data.get("gift") or {}
+    price = data.get("price") or {}
+
+    title = gift.get("title") or gift.get("slug") or "Неизвестный подарок"
+    model = gift.get("model")
+    backdrop = gift.get("backdrop")
+    pattern = gift.get("pattern")
+    number = gift.get("num")
+    slug = gift.get("slug")
+
+    labels = {
+        "listing": "Новое объявление",
+        "price": "Изменение цены",
+        "delisting": "Снятие с продажи",
+        "sale": "Продажа NFT",
+        "new": "Новое улучшение",
+        "mint": "NFT выпущен в блокчейн",
+        "transfer": "Передача подарка",
+    }
+
+    lines = [
+        "NFT RADAR — LIVE",
+        "",
+        f"Событие: {labels.get(event_type, event_type)}",
+        f"Подарок: {title}",
+    ]
+
+    if number is not None:
+        lines.append(f"Номер: #{number}")
+    if model:
+        lines.append(f"Модель: {model}")
+    if backdrop:
+        lines.append(f"Фон: {backdrop}")
+    if pattern:
+        lines.append(f"Узор: {pattern}")
+
+    amount = price.get("amount")
+    currency = price.get("currency")
+
+    if amount is not None:
+        if currency == "gram":
+            price_text = f"{float(amount) / 1_000_000_000:g} TON"
+        elif currency == "usdt":
+            price_text = f"{float(amount) / 1_000_000:g} USDT"
+        elif currency == "xtr":
+            price_text = f"{amount} Stars"
+        else:
+            price_text = f"{amount} {currency or ''}"
+
+        lines.append(f"Цена: {price_text}")
+
+    market = data.get("market")
+    if market:
+        lines.append(f"Маркет: {market}")
+
+    if slug and number is not None:
+        lines.append(f"Telegram: https://t.me/nft/{slug}-{number}")
+
+    lines.extend([
+        "",
+        f"Время: {data.get('at', '—')}",
+        "Источник: see.tg Live",
+    ])
+
+    return "\n".join(lines)
+
+
+async def live_monitor():
+    while True:
+        try:
+            log.info("Connecting to see.tg live feed")
+
+            async with websockets.connect(
+                LIVE_URL,
+                ping_interval=None,
+                close_timeout=10,
+                open_timeout=20,
+            ) as ws:
+
+                await ws.send(json.dumps({
+                    "type": "subscribe",
+                    "events": ["all"],
+                }))
+
+                log.info("see.tg live subscription sent")
+
+                async for raw in ws:
+                    data = json.loads(raw)
+
+                    if data.get("type") != "event":
+                        log.info("Live feed: %s", data)
+                        continue
+
+                    event_type = data.get("event")
+                    if event_type not in {
+                        "listing", "price", "delisting",
+                        "sale", "new", "mint", "transfer",
+                    }:
+                        continue
+
+                    gift = data.get("gift") or {}
+                    price = data.get("price") or {}
+
+                    fingerprint = "|".join(map(str, [
+                        event_type,
+                        gift.get("id"),
+                        gift.get("num"),
+                        data.get("at"),
+                        price.get("amount"),
+                        price.get("currency"),
+                    ]))
+
+                    if fingerprint in live_seen:
+                        continue
+
+                    message = await build_live_message(data)
+                    delivered = await notify(message)
+
+                    if delivered:
+                        live_seen.add(fingerprint)
+                        state["events"] += 1
+                        state["notified"] += 1
+                        log.info("Live event delivered: %s", fingerprint)
+                    else:
+                        state["failed_notifications"] += 1
+                        log.error("Live notification failed")
+
+                    if len(live_seen) > 3000:
+                        live_seen.clear()
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            state["last_error"] = f"Live feed: {error}"
+            log.exception("Live feed disconnected")
+
+        await asyncio.sleep(5)
 
 async def scanner():
     state["running"] = True

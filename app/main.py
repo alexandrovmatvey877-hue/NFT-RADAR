@@ -33,20 +33,35 @@ seen = set()
 
 
 async def notify(message):
-    if not BOT_TOKEN or not CHAT_ID:
-        log.warning("Telegram credentials missing")
+    if not BOT_TOKEN:
+        log.warning("BOT_TOKEN missing")
+        return
+
+    recipients = list(dict.fromkeys(
+        x for x in [CHAT_ID, ADMIN_ID] if x
+    ))
+
+    if not recipients:
+        log.warning("No recipients configured")
         return
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
     async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.post(url, json={
-            "chat_id": CHAT_ID,
-            "text": message[:4000],
-            "disable_web_page_preview": True
-        })
-        r.raise_for_status()
+        for chat_id in recipients:
+            try:
+                r = await client.post(url, json={
+                    "chat_id": chat_id,
+                    "text": message[:4000],
+                    "disable_web_page_preview": True
+                })
+                r.raise_for_status()
 
+                result = r.json()
+                if not result.get("ok"):
+                    log.error("Telegram rejected message: %s", result)
+            except Exception:
+                log.exception("Failed to notify chat %s", chat_id)
 
 async def scan():
     global cursor

@@ -1,18 +1,21 @@
 import asyncio
 import os
 import logging
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import httpx
 from fastapi import FastAPI
 
+from .pricing import get_prices, format_prices
+
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("nft-radar")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
-POLL_SECONDS = int(os.getenv("POLL_SECONDS", "25"))
+POLL_SECONDS = max(15, int(os.getenv("POLL_SECONDS", "25")))
 
 FEED_URL = "https://api.changes.tg/changes"
 
@@ -20,57 +23,54 @@ state = {
     "running": False,
     "last_scan": None,
     "last_error": None,
-    "events": 0
+    "events": 0,
+    "notified": 0
 }
 
+cursor = None
 seen = set()
 
 
 async def notify(message):
     if not BOT_TOKEN or not CHAT_ID:
-        log.warning("Telegram not configured")
+        log.warning("Telegram credentials missing")
         return
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-    async with httpx.AsyncClient(timeout=15) as client:
-        response = await client.post(url, json={
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(url, json={
             "chat_id": CHAT_ID,
-            "text": message,
+            "text": message[:4000],
             "disable_web_page_preview": True
         })
-        response.raise_for_status()
-
-
-def extract_events(data):
-    if isinstance(data, list):
-        return data, None
-
-    if isinstance(data, dict):
-        events = (
-            data.get("changes")
-            or data.get("events")
-            or data.get("data")
-            or []
-        )
-        return events, data.get("next")
-
-    return [], None
+        r.raise_for_status()
 
 
 async def scan():
-    async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.get(FEED_URL)
-        response.raise_for_status()
-        data = response.json()
+    global cursor
 
-    events, cursor = extract_events(data)
+    params = {"limit": 100}
+
+    if cursor:
+        params["since"] = cursor
+    else:
+        # При первом запуске не отправляем всю старую историю.
+        params["since"] = int(time.time() * 1000)
+
+    async with httpx.AsyncClient(timeout=25) as client:
+        r = await client.get(FEED_URL, params=params)
+        r.raise_for_status()
+        data = r.json()
+
+    events = data if isinstance(data, list) else data.get("changes", [])
+    next_cursor = None if isinstance(data, list) else data.get("next")
 
     for event in events:
         if not isinstance(event, dict):
             continue
 
-        event_id = str(event.get("id") or repr(event))
+        event_id = str(event.get("id", repr(event)))
 
         if event_id in seen:
             continue
@@ -78,19 +78,48 @@ async def scan():
         seen.add(event_id)
 
         kind = event.get("type", "update")
-        gift = event.get("gift") or event.get("giftName") or "Unknown"
-        model = event.get("model") or event.get("modelName") or "—"
+        gift = event.get("gift", "Unknown")
 
-        message = (
-            "🎁 NFT RADAR\n\n"
-            f"Событие: {kind}\n"
-            f"Подарок: {gift}\n"
-            f"Модель: {model}\n"
-            f"Время: {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"
-        )
+        model = event.get("model")
+        if isinstance(model, dict):
+            model = model.get("name")
 
-        await notify(message)
+        backdrop = event.get("backdrop")
+        symbol = event.get("symbol")
+
+        lines = [
+            "🎁 NFT RADAR",
+            "",
+            f"Событие: {kind}",
+            f"Подарок: {gift}"
+        ]
+
+        if model:
+            lines.append(f"Модель: {model}")
+        if backdrop:
+            lines.append(f"Фон: {backdrop}")
+        if symbol:
+            lines.append(f"Узор: {symbol}")
+
+        if model:
+            prices = await get_prices(gift, model)
+        else:
+            prices = await get_prices(gift)
+
+        lines.extend(["", format_prices(prices)])
+        lines.extend([
+            "",
+            f"Время: {event.get('at', '—')}",
+            "Источник событий: GiftChanges API"
+        ])
+
+        await notify("\n".join(lines))
+
         state["events"] += 1
+        state["notified"] += 1
+
+    if next_cursor is not None:
+        cursor = next_cursor
 
     state["last_scan"] = datetime.now(timezone.utc).isoformat()
 
@@ -102,11 +131,11 @@ async def scanner():
         try:
             await scan()
             state["last_error"] = None
-        except Exception as error:
-            state["last_error"] = str(error)
-            log.exception("Scanner error")
+        except Exception as e:
+            state["last_error"] = str(e)
+            log.exception("Scanner failed")
 
-        await asyncio.sleep(max(10, POLL_SECONDS))
+        await asyncio.sleep(POLL_SECONDS)
 
 
 @asynccontextmanager
@@ -114,6 +143,10 @@ async def lifespan(app):
     task = asyncio.create_task(scanner())
     yield
     task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(title="NFT-RADAR", lifespan=lifespan)
@@ -121,10 +154,7 @@ app = FastAPI(title="NFT-RADAR", lifespan=lifespan)
 
 @app.get("/")
 async def home():
-    return {
-        "name": "NFT-RADAR",
-        "status": "online"
-    }
+    return {"name": "NFT-RADAR", "status": "online"}
 
 
 @app.get("/health")
@@ -134,7 +164,12 @@ async def health():
 
 @app.get("/status")
 async def status():
-    return state
+    return {
+        **state,
+        "cursor": cursor,
+        "poll_seconds": POLL_SECONDS,
+        "telegram_configured": bool(BOT_TOKEN and CHAT_ID)
+    }
 
 
 @app.post("/test")

@@ -79,7 +79,10 @@ async def scan():
         r.raise_for_status()
         data = r.json()
 
-    events = data if isinstance(data, list) else data.get("changes", [])
+    events = (
+    data if isinstance(data, list)
+    else data.get("events", data.get("changes", []))
+)
     next_cursor = None if isinstance(data, list) else data.get("next")
 
     for event in events:
